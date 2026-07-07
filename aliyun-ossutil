@@ -1,0 +1,170 @@
+#!/bin/sh
+set -eu
+
+OSSUTIL="${OSSUTIL:-/usr/local/bin/ossutil}"
+
+log() {
+  printf '[aliyun-ossutil] %s\n' "$*" >&2
+}
+
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+derive_region_from_endpoint() {
+  endpoint=$1
+  case "$endpoint" in
+    oss-*)
+      region=$(printf '%s' "$endpoint" | sed -E 's/^oss-([^.]+)(\.internal)?\.aliyuncs\.com(\/)?$/\1/')
+      if [ "$region" != "$endpoint" ]; then
+        printf '%s' "$region"
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+append_global_args() {
+  if [ -n "${OSS_REGION:-}" ]; then
+    set -- --region "$OSS_REGION" "$@"
+  elif [ -n "${OSS_ENDPOINT:-}" ]; then
+    set -- --endpoint "$OSS_ENDPOINT" "$@"
+  fi
+  if [ -n "${OSS_MODE:-}" ]; then
+    set -- --mode "$OSS_MODE" "$@"
+  fi
+  if [ -n "${OSS_ECS_ROLE_NAME:-}" ]; then
+    set -- --ecs-role-name "$OSS_ECS_ROLE_NAME" "$@"
+  fi
+  if [ -n "${OSSUTIL_CONFIG_FILE:-}" ]; then
+    set -- --config-file "$OSSUTIL_CONFIG_FILE" "$@"
+  fi
+  if truthy "${OSSUTIL_IGNORE_ENV_VAR:-}"; then
+    set -- --ignore-env-var "$@"
+  fi
+}
+
+configure_location() {
+  if [ -n "${OSS_REGION:-}" ]; then
+    export OSS_REGION
+    return 0
+  fi
+
+  if [ -n "${OSS_ENDPOINT:-}" ]; then
+    export OSS_ENDPOINT
+    derived=$(derive_region_from_endpoint "$OSS_ENDPOINT" || true)
+    if [ -n "$derived" ]; then
+      export OSS_REGION="$derived"
+    fi
+    return 0
+  fi
+
+  export OSS_REGION="${OSS_REGION:-cn-hangzhou}"
+}
+
+validate_auth() {
+  mode=${OSS_MODE:-}
+
+  if [ -n "$mode" ]; then
+    case "$mode" in
+      EcsRamRole|Ali-EcsRamRole|Anonymous)
+        return 0
+        ;;
+      AK|StsToken|RamRoleArn)
+        [ -n "${OSS_ACCESS_KEY_ID:-}" ] || die "OSS_MODE=${mode} 需要设置 OSS_ACCESS_KEY_ID"
+        [ -n "${OSS_ACCESS_KEY_SECRET:-}" ] || die "OSS_MODE=${mode} 需要设置 OSS_ACCESS_KEY_SECRET"
+        if [ "$mode" = "StsToken" ] && [ -z "${OSS_SESSION_TOKEN:-}" ]; then
+          die "OSS_MODE=StsToken 需要设置 OSS_SESSION_TOKEN"
+        fi
+        return 0
+        ;;
+      *)
+        die "不支持的 OSS_MODE: ${mode}"
+        ;;
+    esac
+  fi
+
+  if [ -n "${OSS_ACCESS_KEY_ID:-}" ] || [ -n "${OSS_ACCESS_KEY_SECRET:-}" ]; then
+    [ -n "${OSS_ACCESS_KEY_ID:-}" ] || die "请设置 OSS_ACCESS_KEY_ID"
+    [ -n "${OSS_ACCESS_KEY_SECRET:-}" ] || die "请设置 OSS_ACCESS_KEY_SECRET"
+    return 0
+  fi
+
+  die "请设置 OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET，或指定 OSS_MODE=EcsRamRole"
+}
+
+should_recurse() {
+  source_path=$1
+  recursive=${RECURSIVE:-auto}
+
+  case "$recursive" in
+    auto)
+      [ -d "$source_path" ]
+      ;;
+    *)
+      truthy "$recursive"
+      ;;
+  esac
+}
+
+run_default_upload() {
+  bucket=${OSS_BUCKET:-}
+  source_path=${SOURCE:-/data}
+  dest=${DEST:-}
+
+  [ -x "$OSSUTIL" ] || die "ossutil 不存在或不可执行: ${OSSUTIL}"
+  [ -n "$bucket" ] || die "请设置 OSS_BUCKET"
+  [ -e "$source_path" ] || die "SOURCE 不存在: ${source_path}"
+
+  if [ -z "$dest" ]; then
+    dest=$(basename "$source_path")
+  fi
+
+  dest=${dest#/}
+  target="oss://${bucket}/${dest}"
+
+  set -- cp
+  if should_recurse "$source_path"; then
+    set -- "$@" -r
+  fi
+  if truthy "${FORCE:-true}"; then
+    set -- "$@" -f
+  fi
+  if truthy "${DRY_RUN:-}" ]; then
+    set -- "$@" --dry-run
+  fi
+  if [ -n "${META:-}" ]; then
+    set -- "$@" --meta "$META"
+  fi
+
+  if [ -n "${OSSUTIL_EXTRA_ARGS:-}" ]; then
+    # shellcheck disable=SC2086
+    set -- "$@" ${OSSUTIL_EXTRA_ARGS}
+  fi
+
+  set -- "$@" "$source_path" "$target"
+  append_global_args "$@"
+  log "上传 ${source_path} -> ${target}"
+  exec "$OSSUTIL" "$@"
+}
+
+configure_location
+validate_auth
+
+if [ "$#" -gt 0 ]; then
+  [ -x "$OSSUTIL" ] || die "ossutil 不存在或不可执行: ${OSSUTIL}"
+  append_global_args "$@"
+  log "执行自定义命令: ossutil $*"
+  exec "$OSSUTIL" "$@"
+fi
+
+run_default_upload
