@@ -35,6 +35,30 @@ docker run --rm \
   shencangsheng/aliyun-ossutil
 ```
 
+上传多个文件到同一 OSS 目录：
+
+```bash
+docker run --rm \
+  -e OSS_ACCESS_KEY_ID=your-key-id \
+  -e OSS_ACCESS_KEY_SECRET=your-key-secret \
+  -e OSS_BUCKET=my-bucket \
+  -e OSS_REGION=cn-hangzhou \
+  -e SOURCES="/data/app.tar.gz,/data/manifest.json" \
+  -e DEST=artifacts/v1.0.0 \
+  -v "$(pwd)/app.tar.gz:/data/app.tar.gz:ro" \
+  -v "$(pwd)/manifest.json:/data/manifest.json:ro" \
+  shencangsheng/aliyun-ossutil
+```
+
+结果：
+
+```
+oss://my-bucket/artifacts/v1.0.0/app.tar.gz
+oss://my-bucket/artifacts/v1.0.0/manifest.json
+```
+
+`SOURCES` 与 `SOURCE` 二选一；设置 `SOURCES` 时必须指定 `DEST` 目录前缀。路径用逗号分隔，可含空格，例如 `/data/my file.tar.gz,/data/manifest.json`。
+
 ### 环境变量
 
 | 变量                    | 必填     | 说明                                                     |
@@ -47,8 +71,9 @@ docker run --rm \
 | `OSS_SESSION_TOKEN`     | 否       | STS 临时凭证                                             |
 | `OSS_MODE`              | 否       | 认证模式：`AK` / `StsToken` / `EcsRamRole` 等            |
 | `OSS_ECS_ROLE_NAME`     | 否       | ECS 实例 RAM 角色名（`EcsRamRole` 模式）                 |
-| `SOURCE`                | 否       | 本地路径，默认 `/data`                                   |
-| `DEST`                  | 否       | OSS 对象前缀/路径，默认取 `SOURCE` 的文件名              |
+| `SOURCE`                | 否       | 本地路径，默认 `/data`（单文件/目录）                    |
+| `SOURCES`               | 否       | 多个本地路径，逗号 `,` 分隔；需配合 `DEST` 作为 OSS 目录前缀 |
+| `DEST`                  | 否       | OSS 对象前缀/路径；`SOURCES` 模式下为目录前缀            |
 | `RECURSIVE`             | 否       | `auto`（默认，目录自动递归）/ `true` / `false`           |
 | `FORCE`                 | 否       | 覆盖已有对象，默认 `true`                                |
 | `DRY_RUN`               | 否       | 设为 `true` 时只预演不上传                               |
@@ -137,12 +162,10 @@ jobs:
 
 ```yaml
 - name: Upload artifacts
-  run: |
-    for file in app.tar.gz manifest.json; do
-      SOURCE="${{ github.workspace }}/${file}" \
-      DEST="artifacts/${{ github.ref_name }}/${file}" \
-      aliyun-ossutil
-    done
+  env:
+    SOURCES: ${{ github.workspace }}/app.tar.gz,${{ github.workspace }}/manifest.json
+    DEST: artifacts/${{ github.ref_name }}
+  run: aliyun-ossutil
 ```
 
 **docker run 步骤**
@@ -205,6 +228,16 @@ upload-release:
     DEST: releases/${CI_PROJECT_NAME}/${CI_COMMIT_TAG}/app.tar.gz
   rules:
     - if: $CI_COMMIT_TAG
+```
+
+上传多个文件到同一 OSS 目录：
+
+```yaml
+upload-artifacts:
+  extends: .upload-to-oss
+  variables:
+    SOURCES: ${CI_PROJECT_DIR}/app.tar.gz,${CI_PROJECT_DIR}/manifest.json
+    DEST: releases/${CI_PROJECT_NAME}/${CI_COMMIT_TAG}
 ```
 
 **Shell Runner + docker run**

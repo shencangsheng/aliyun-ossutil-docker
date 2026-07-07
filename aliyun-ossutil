@@ -116,44 +116,107 @@ should_recurse() {
   esac
 }
 
-run_default_upload() {
-  bucket=${OSS_BUCKET:-}
-  source_path=${SOURCE:-/data}
-  dest=${DEST:-}
+trim_whitespace() {
+  printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
 
-  [ -x "$OSSUTIL" ] || die "ossutil 不存在或不可执行: ${OSSUTIL}"
-  [ -n "$bucket" ] || die "请设置 OSS_BUCKET"
-  [ -e "$source_path" ] || die "SOURCE 不存在: ${source_path}"
+next_source_from_list() {
+  _list=$1
+  case "$_list" in
+    *,*)
+      SOURCES_NEXT=${_list%%,*}
+      SOURCES_REST=${_list#*,}
+      ;;
+    *)
+      SOURCES_NEXT=$_list
+      SOURCES_REST=
+      ;;
+  esac
+  SOURCES_NEXT=$(trim_whitespace "$SOURCES_NEXT")
+}
 
-  if [ -z "$dest" ]; then
-    dest=$(basename "$source_path")
+any_source_needs_recurse() {
+  if [ -n "${SOURCES:-}" ]; then
+    _remaining=$SOURCES
+    while [ -n "$_remaining" ]; do
+      next_source_from_list "$_remaining"
+      _remaining=$SOURCES_REST
+      [ -n "$SOURCES_NEXT" ] || continue
+      if should_recurse "$SOURCES_NEXT"; then
+        return 0
+      fi
+    done
+    return 1
   fi
 
-  dest=${dest#/}
-  target="oss://${bucket}/${dest}"
+  should_recurse "${SOURCE:-/data}"
+}
 
-  set -- cp
-  if should_recurse "$source_path"; then
+append_sources_from_env() {
+  _remaining=${SOURCES:-}
+  while [ -n "$_remaining" ]; do
+    next_source_from_list "$_remaining"
+    _remaining=$SOURCES_REST
+    [ -n "$SOURCES_NEXT" ] || continue
+    [ -e "$SOURCES_NEXT" ] || die "SOURCE 不存在: ${SOURCES_NEXT}"
+    set -- "$@" "$SOURCES_NEXT"
+  done
+}
+
+append_cp_options() {
+  if any_source_needs_recurse; then
     set -- "$@" -r
   fi
   if truthy "${FORCE:-true}"; then
     set -- "$@" -f
   fi
-  if truthy "${DRY_RUN:-}" ]; then
+  if truthy "${DRY_RUN:-}"; then
     set -- "$@" --dry-run
   fi
   if [ -n "${META:-}" ]; then
     set -- "$@" --meta "$META"
   fi
-
   if [ -n "${OSSUTIL_EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2086
     set -- "$@" ${OSSUTIL_EXTRA_ARGS}
   fi
+}
 
-  set -- "$@" "$source_path" "$target"
+run_default_upload() {
+  bucket=${OSS_BUCKET:-}
+  dest=${DEST:-}
+
+  [ -x "$OSSUTIL" ] || die "ossutil 不存在或不可执行: ${OSSUTIL}"
+  [ -n "$bucket" ] || die "请设置 OSS_BUCKET"
+
+  set -- cp
+  append_cp_options
+
+  if [ -n "${SOURCES:-}" ]; then
+    [ -n "$dest" ] || die "多文件上传（SOURCES）需要设置 DEST 作为 OSS 目录前缀"
+    dest=${dest#/}
+    dest=${dest%/}
+    target="oss://${bucket}/${dest}/"
+
+    append_sources_from_env
+    set -- "$@" "$target"
+    log "上传多文件 (${SOURCES}) -> ${target}"
+  else
+    source_path=${SOURCE:-/data}
+    [ -e "$source_path" ] || die "SOURCE 不存在: ${source_path}"
+
+    if [ -z "$dest" ]; then
+      dest=$(basename "$source_path")
+    fi
+
+    dest=${dest#/}
+    target="oss://${bucket}/${dest}"
+
+    set -- "$@" "$source_path" "$target"
+    log "上传 ${source_path} -> ${target}"
+  fi
+
   append_global_args "$@"
-  log "上传 ${source_path} -> ${target}"
   exec "$OSSUTIL" "$@"
 }
 
